@@ -29,7 +29,7 @@ on:
       skip_nixos:
         description: Skip the NixOS package job
         type: boolean
-        default: false
+        default: true
 
 # Prevent duplicate workflow runs for the same tag.
 concurrency:
@@ -328,7 +328,9 @@ jobs:
   nixos:
     runs-on: ubuntu-latest
     timeout-minutes: 60
-    if: ${{ ! inputs.skip_nixos }}
+    # NixOS package is opt-in for manual runs only. It is not part of releases
+    # because its dependency hashes require independent maintenance.
+    if: ${{ github.event_name == 'workflow_dispatch' && !inputs.skip_nixos }}
 
     steps:
       - name: Checkout
@@ -765,7 +767,6 @@ jobs:
       - android
       - ios
       - linux
-      - nixos
 
     runs-on: ubuntu-latest
 
@@ -814,12 +815,6 @@ jobs:
           name: linux
           path: artifacts/linux
 
-      - name: Download NixOS artifact
-        uses: actions/download-artifact@v7
-        with:
-          name: nixos
-          path: artifacts/nixos
-
       - name: Show release files
         shell: bash
         run: |
@@ -842,7 +837,6 @@ jobs:
             artifacts/linux/**/*.AppImage
             artifacts/linux/**/*.deb
             artifacts/linux/**/*.rpm
-            artifacts/nixos/**/*.tar.gz
           draft: true
           generate_release_notes: true
           fail_on_unmatched_files: true
@@ -850,7 +844,7 @@ jobs:
             ## Installation
 
             This release includes Windows installers, macOS x64/ARM64 DMGs, Android APK,
-            unsigned iOS IPA, plus Linux AppImage, deb, rpm and NixOS binary packages.
+            unsigned iOS IPA, plus Linux AppImage, deb and rpm packages.
 
             The iOS IPA cannot be installed directly or uploaded to the App Store.
 
