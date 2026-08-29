@@ -614,7 +614,8 @@ struct ArchiveCheckpoint {
 
 const ARCHIVE_RATE_WINDOW_SECONDS: i64 = 10 * 60;
 const ARCHIVE_RATE_PAGE_LIMIT: i64 = 300;
-const ARCHIVE_CURSOR_MAX_AGE_SECONDS: i64 = 10 * 60;
+const MIN_RESUME_CURSOR_MAX_AGE_SECONDS: i64 = 10 * 60;
+const MAX_RESUME_CURSOR_MAX_AGE_SECONDS: i64 = 24 * 60 * 60;
 const ARCHIVE_SKIP_MAX_OFFSET_ADVANCE: i64 = 4_096;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -796,8 +797,8 @@ fn record_archive_skip(
     Ok(())
 }
 
-fn checkpoint_is_stale(checkpoint: &ArchiveCheckpoint, current: i64) -> bool {
-    current.saturating_sub(checkpoint.updated_at) >= ARCHIVE_CURSOR_MAX_AGE_SECONDS
+fn checkpoint_is_stale(checkpoint: &ArchiveCheckpoint, current: i64, max_age_seconds: i64) -> bool {
+    current.saturating_sub(checkpoint.updated_at) >= max_age_seconds
 }
 
 fn reserve_archive_page(app: &tauri::AppHandle, owner_uin: &str) -> Result<Option<i64>, String> {
@@ -1334,6 +1335,7 @@ async fn fetch_after_skipped_cursor(
     cursor: &str,
     first_advance: i64,
     interval_ms: u64,
+    feed_retry_attempts: u32,
 ) -> Result<(qzone::FeedPage, String, i64), String> {
     let first_advance = first_advance.clamp(1, ARCHIVE_SKIP_MAX_OFFSET_ADVANCE);
     let mut last_error = None;
@@ -1348,7 +1350,14 @@ async fn fetch_after_skipped_cursor(
             return Err(format!("ARCHIVE_RATE_LIMIT:{retry_at}"));
         }
         let candidate = advance_feed_cursor(cursor, offset_advance)?;
-        match qzone::fetch_feeds_once(login, "2", Some(&candidate)).await {
+        match qzone::fetch_feeds_with_retry_attempts(
+            login,
+            "2",
+            Some(&candidate),
+            feed_retry_attempts,
+        )
+        .await
+        {
             Ok(page) => {
                 best = Some((page, candidate, offset_advance));
                 break;
@@ -1384,7 +1393,14 @@ async fn fetch_after_skipped_cursor(
             return Err(format!("ARCHIVE_RATE_LIMIT:{retry_at}"));
         }
         let candidate = advance_feed_cursor(cursor, offset_advance)?;
-        match qzone::fetch_feeds_once(login, "2", Some(&candidate)).await {
+        match qzone::fetch_feeds_with_retry_attempts(
+            login,
+            "2",
+            Some(&candidate),
+            feed_retry_attempts,
+        )
+        .await
+        {
             Ok(page) => {
                 best = (page, candidate, offset_advance);
                 high = offset_advance.saturating_sub(1);
@@ -1425,8 +1441,21 @@ pub async fn start_feed_archive(
     login: tauri::State<'_, QLoginState>,
     archive: tauri::State<'_, ArchiveState>,
     interval_ms: u64,
+    mode: String,
+    resume_cursor_max_age_seconds: i64,
+    feed_retry_attempts: u32,
 ) -> Result<ArchiveProgress, String> {
     let interval_ms = interval_ms.clamp(2_000, 30_000);
+    let resume_cursor_max_age_seconds = resume_cursor_max_age_seconds.clamp(
+        MIN_RESUME_CURSOR_MAX_AGE_SECONDS,
+        MAX_RESUME_CURSOR_MAX_AGE_SECONDS,
+    );
+    let feed_retry_attempts = feed_retry_attempts.clamp(1, 12);
+    let force_fresh = match mode.as_str() {
+        "auto" => false,
+        "fresh" => true,
+        _ => return Err("无效的归档启动方式".into()),
+    };
     if archive.batch_retrying.load(Ordering::Relaxed) {
         return Err("正在批量重试异常位置，请等待完成或停止后再开始归档".into());
     }
@@ -1453,17 +1482,23 @@ pub async fn start_feed_archive(
     let checkpoint = load_checkpoint(&app, &owner_uin)?;
     let stale_checkpoint = checkpoint
         .as_ref()
-        .is_some_and(|value| checkpoint_is_stale(value, now()));
-    let mut reset_checkpoint_stats = stale_checkpoint;
+        .is_some_and(|value| checkpoint_is_stale(value, now(), resume_cursor_max_age_seconds));
+    let resume_mode = !force_fresh && checkpoint.is_some() && !stale_checkpoint;
+    let mut reset_checkpoint_stats = !resume_mode;
     let mut cursor = checkpoint
         .as_ref()
-        .filter(|_| !stale_checkpoint)
+        .filter(|_| resume_mode)
         .map(|value| value.cursor.clone());
     let mut seen_cursors = HashSet::new();
-    if stale_checkpoint {
+    if force_fresh {
         set_progress(&archive, |progress| {
             progress.message =
-                "上次分页位置已超过 10 分钟，正在从第一页重新校验；已保存记录会自动去重。".into();
+                "正在从第一页重新归档；已保存记录会自动去重，不会删除本地数据。".into();
+        });
+    } else if stale_checkpoint {
+        set_progress(&archive, |progress| {
+            progress.message =
+                "上次断点已超过设定等待时间，正在从第一页重新归档；已保存记录会自动去重。".into();
         });
     } else if let Some(checkpoint) = checkpoint.as_ref() {
         let saved_cursor = &checkpoint.cursor;
@@ -1500,6 +1535,7 @@ pub async fn start_feed_archive(
                         current_cursor,
                         known_advance,
                         interval_ms,
+                        feed_retry_attempts,
                     )
                     .await?;
                     skipped_page = Some((
@@ -1511,7 +1547,7 @@ pub async fn start_feed_archive(
                     ));
                     page
                 } else {
-                    match qzone::fetch_feeds(&login, "2", Some(current_cursor)).await {
+                    match qzone::fetch_feeds_with_retry_attempts(&login, "2", Some(current_cursor), feed_retry_attempts).await {
                         Ok(page) => page,
                         Err(error) if qzone::feed_error_can_skip(&error) => {
                             let details =
@@ -1551,6 +1587,7 @@ pub async fn start_feed_archive(
                                 current_cursor,
                                 1,
                                 interval_ms,
+                                feed_retry_attempts,
                             )
                             .await?;
                             skipped_page = Some((
@@ -1568,7 +1605,7 @@ pub async fn start_feed_archive(
             } else {
                 let mut first_page_result = None;
                 for first_attempt in 1..=3u32 {
-                    match qzone::fetch_feeds(&login, "1", None).await {
+                    match qzone::fetch_feeds_with_retry_attempts(&login, "1", None, feed_retry_attempts).await {
                         Ok(page) => {
                             first_page_result = Some(page);
                             break;
@@ -1577,7 +1614,7 @@ pub async fn start_feed_archive(
                             if first_attempt < 3 {
                                 set_progress(&archive, |progress| {
                                     progress.message = format!(
-                                        "第一页请求失败（{error}），{first_attempt}/3 次重试中…"
+                                    "第一页请求失败（{error}），任务级第 {first_attempt}/3 轮重试中…"
                                     );
                                 });
                                 tokio::time::sleep(std::time::Duration::from_secs(
@@ -1791,9 +1828,18 @@ pub async fn retry_archive_skip(
     login: tauri::State<'_, QLoginState>,
     archive: tauri::State<'_, ArchiveState>,
     id: i64,
+    feed_retry_attempts: u32,
 ) -> Result<ArchiveSkipRetryResult, String> {
     let owner_uin = login.qzone_auth().await?.uin;
-    retry_single_skip(&app, &login, &archive, &owner_uin, id).await
+    retry_single_skip(
+        &app,
+        &login,
+        &archive,
+        &owner_uin,
+        id,
+        feed_retry_attempts.clamp(1, 12),
+    )
+    .await
 }
 
 #[derive(Serialize)]
@@ -1811,6 +1857,7 @@ pub async fn retry_all_archive_skips(
     login: tauri::State<'_, QLoginState>,
     archive: tauri::State<'_, ArchiveState>,
     interval_ms: u64,
+    feed_retry_attempts: u32,
 ) -> Result<ArchiveSkipBatchRetryResult, String> {
     let owner_uin = login.qzone_auth().await?.uin;
     ensure_archive_idle(&archive)?;
@@ -1856,7 +1903,16 @@ pub async fn retry_all_archive_skips(
                 recovered_records: result.recovered_records,
             });
         });
-        match retry_single_skip(&app, &login, &archive, &owner_uin, id).await {
+        match retry_single_skip(
+            &app,
+            &login,
+            &archive,
+            &owner_uin,
+            id,
+            feed_retry_attempts.clamp(1, 12),
+        )
+        .await
+        {
             Ok(outcome) => {
                 if outcome.success {
                     result.recovered += 1;
@@ -1875,7 +1931,8 @@ pub async fn retry_all_archive_skips(
                 });
             }
             Err(error) => {
-                if error.starts_with("请求频率保护中") || error.starts_with("归档任务运行中") {
+                if error.starts_with("请求频率保护中") || error.starts_with("归档任务运行中")
+                {
                     break;
                 }
                 result.failed += 1;
@@ -1916,6 +1973,7 @@ async fn retry_single_skip(
     archive: &tauri::State<'_, ArchiveState>,
     owner_uin: &str,
     id: i64,
+    feed_retry_attempts: u32,
 ) -> Result<ArchiveSkipRetryResult, String> {
     let connection = open_database(app)?;
     let (cursor, resolved_at) = connection
@@ -1939,7 +1997,9 @@ async fn retry_single_skip(
         return Err(format!("请求频率保护中，请在 {retry_at} 后重试"));
     }
     let attempted_at = now();
-    match qzone::fetch_feeds(login, "2", Some(&cursor)).await {
+    match qzone::fetch_feeds_with_retry_attempts(login, "2", Some(&cursor), feed_retry_attempts)
+        .await
+    {
         Ok(page) => {
             let recovered_records = page.feeds.len() as u64;
             save_retried_page(app, owner_uin, &page.feeds)?;
@@ -3163,8 +3223,8 @@ mod tests {
             updated_at: 1_000,
         };
 
-        assert!(!checkpoint_is_stale(&checkpoint, 1_599));
-        assert!(checkpoint_is_stale(&checkpoint, 1_600));
+        assert!(!checkpoint_is_stale(&checkpoint, 1_599, 600));
+        assert!(checkpoint_is_stale(&checkpoint, 1_600, 600));
     }
 
     #[test]

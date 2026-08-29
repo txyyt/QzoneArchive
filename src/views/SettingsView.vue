@@ -4,15 +4,18 @@ import { onMounted, ref, watch } from "vue";
 import Button from "primevue/button";
 import Dialog from "primevue/dialog";
 import InputNumber from "primevue/inputnumber";
+import Select from "primevue/select";
 import { getVersion } from "@tauri-apps/api/app";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useAuthStore } from "../stores/auth";
-import { DEFAULT_ARCHIVE_INTERVAL, MIN_ARCHIVE_INTERVAL, getArchiveInterval, resetAppSettings, setArchiveInterval } from "../utils/appSettings";
+import { DEFAULT_ARCHIVE_FEED_RETRY_ATTEMPTS, DEFAULT_ARCHIVE_INTERVAL, DEFAULT_RESUME_CURSOR_MAX_AGE_SECONDS, MAX_ARCHIVE_FEED_RETRY_ATTEMPTS, MIN_ARCHIVE_FEED_RETRY_ATTEMPTS, MIN_ARCHIVE_INTERVAL, RESUME_CURSOR_AGE_OPTIONS, getArchiveFeedRetryAttempts, getArchiveInterval, getResumeCursorMaxAgeSeconds, resetAppSettings, setArchiveFeedRetryAttempts, setArchiveInterval, setResumeCursorMaxAgeSeconds } from "../utils/appSettings";
 import { deleteAllAppData } from "../utils/qzone";
 
 const authStore = useAuthStore();
 const { loggedIn, user } = storeToRefs(authStore);
 const intervalMs = ref(getArchiveInterval());
+const resumeCursorMaxAgeSeconds = ref(getResumeCursorMaxAgeSeconds());
+const feedRetryAttempts = ref(getArchiveFeedRetryAttempts());
 const privacyVisible = ref(false);
 const deleteVisible = ref(false);
 const deleting = ref(false);
@@ -33,12 +36,14 @@ function hideMissingSponsorCode(event: Event) {
 }
 
 watch(intervalMs, (value) => { intervalMs.value = setArchiveInterval(value); });
+watch(resumeCursorMaxAgeSeconds, (value) => { resumeCursorMaxAgeSeconds.value = setResumeCursorMaxAgeSeconds(value); });
+watch(feedRetryAttempts, (value) => { feedRetryAttempts.value = setArchiveFeedRetryAttempts(value); });
 
 async function deleteEverything() {
   deleting.value = true; error.value = "";
   try {
     await deleteAllAppData();
-    resetAppSettings(); intervalMs.value = DEFAULT_ARCHIVE_INTERVAL;
+    resetAppSettings(); intervalMs.value = DEFAULT_ARCHIVE_INTERVAL; resumeCursorMaxAgeSeconds.value = DEFAULT_RESUME_CURSOR_MAX_AGE_SECONDS; feedRetryAttempts.value = DEFAULT_ARCHIVE_FEED_RETRY_ATTEMPTS;
     await authStore.logout();
     deleteVisible.value = false;
   } catch (reason) { error.value = String(reason); }
@@ -57,6 +62,16 @@ async function deleteEverything() {
     <article class="surface-card settings-card interval-setting">
       <div class="settings-copy"><span class="settings-icon tone-green"><i class="pi pi-clock" /></span><div><h3>单页获取间隔</h3><p>每读取一页后等待一段时间再请求下一页，间隔越久越稳定。</p></div></div>
       <div class="interval-control"><InputNumber v-model="intervalMs" :min="MIN_ARCHIVE_INTERVAL" :max="30000" :step="500" suffix=" ms" show-buttons button-layout="horizontal" decrement-button-icon="pi pi-minus" increment-button-icon="pi pi-plus" /><small>最低 2000ms，建议 3000–5000ms</small></div>
+    </article>
+
+    <article class="surface-card settings-card interval-setting">
+      <div class="settings-copy"><span class="settings-icon tone-purple"><i class="pi pi-refresh" /></span><div><h3>单页失败重试次数</h3><p>QQ 空间接口出现 5xx 或临时异常时，同一页最多请求的次数。次数越高，成功机会越大，但等待时间也会更长。</p></div></div>
+      <div class="interval-control"><InputNumber v-model="feedRetryAttempts" :min="MIN_ARCHIVE_FEED_RETRY_ATTEMPTS" :max="MAX_ARCHIVE_FEED_RETRY_ATTEMPTS" :step="1" suffix=" 次" show-buttons button-layout="horizontal" decrement-button-icon="pi pi-minus" increment-button-icon="pi pi-plus" /><small>默认 6 次，范围 1–12 次</small></div>
+    </article>
+
+    <article class="surface-card settings-card interval-setting">
+      <div class="settings-copy"><span class="settings-icon tone-blue"><i class="pi pi-history" /></span><div><h3>断点续传等待时间</h3><p>在此时间内会自动从上次断点继续；超过后，开始归档默认从第一页重新扫描。</p></div></div>
+      <div class="interval-control"><Select v-model="resumeCursorMaxAgeSeconds" :options="[...RESUME_CURSOR_AGE_OPTIONS]" option-label="label" option-value="value" /><small>推荐 1 小时；QQ 空间不保证旧游标长期有效</small></div>
     </article>
 
     <article class="surface-card settings-card">

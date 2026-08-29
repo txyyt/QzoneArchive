@@ -15,6 +15,7 @@ export function fetchMoreFeeds(attachInfo: string) {
 }
 
 export type ArchiveStatus = "idle" | "running" | "completed" | "cancelled" | "limited" | "error";
+export type ArchiveStartMode = "auto" | "fresh";
 export interface BatchRetryProgress { current: number; total: number; recovered: number; failed: number; recoveredRecords: number; }
 export interface ArchiveProgress { status: ArchiveStatus; pages: number; fetched: number; saved: number; skipped: number; message: string; retryAt?: number; batchRetry?: BatchRetryProgress; }
 export interface ArchiveSkipItem {
@@ -36,12 +37,13 @@ export interface ArchiveComment { uin?: string; nickname?: string; content: stri
 export type ArchiveCategory = "self" | "other" | "guestbook";
 export interface ArchiveMediaItem { key: string; dynamicId: number; mediaType: "photo" | "video"; pictureIndex?: number; url: string; coverUrl?: string; publishedAt: number; authorUin?: string; authorName?: string; content?: string; }
 export interface ArchiveMediaPage { items: ArchiveMediaItem[]; total: number; years: number[]; }
-export const startFeedArchive = (intervalMs: number) => invoke<ArchiveProgress>("start_feed_archive", { intervalMs });
+export const startFeedArchive = (intervalMs: number, mode: ArchiveStartMode, resumeCursorMaxAgeSeconds: number, feedRetryAttempts: number) =>
+  invoke<ArchiveProgress>("start_feed_archive", { intervalMs, mode, resumeCursorMaxAgeSeconds, feedRetryAttempts });
 export const getArchiveProgress = () => invoke<ArchiveProgress>("get_archive_progress");
 export const cancelFeedArchive = () => invoke<void>("cancel_feed_archive");
 export const listArchiveSkips = () => invoke<ArchiveSkipItem[]>("list_archive_skips");
-export const retryArchiveSkip = (id: number) => invoke<ArchiveSkipRetryResult>("retry_archive_skip", { id });
-export const retryAllArchiveSkips = (intervalMs: number) => invoke<ArchiveSkipBatchRetryResult>("retry_all_archive_skips", { intervalMs });
+export const retryArchiveSkip = (id: number, feedRetryAttempts: number) => invoke<ArchiveSkipRetryResult>("retry_archive_skip", { id, feedRetryAttempts });
+export const retryAllArchiveSkips = (intervalMs: number, feedRetryAttempts: number) => invoke<ArchiveSkipBatchRetryResult>("retry_all_archive_skips", { intervalMs, feedRetryAttempts });
 export const listArchivedFeeds = (limit = 100, offset = 0, category: ArchiveCategory = "self") => invoke<ArchiveItem[]>("list_archived_feeds", { limit, offset, category });
 export const listArchivedMedia = (limit = 60, offset = 0, year?: number) => invoke<ArchiveMediaPage>("list_archived_media", { limit, offset, year });
 export const getArchivedFeed = (id: number) => invoke<ArchiveItem>("get_archived_feed", { id });

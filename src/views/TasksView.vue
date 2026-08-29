@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { storeToRefs } from "pinia";
 import Button from "primevue/button";
+import Menu from "primevue/menu";
 import ProgressBar from "primevue/progressbar";
 import Tag from "primevue/tag";
 import {
@@ -9,7 +10,7 @@ import {
   type ArchiveProgress, type ArchiveSkipItem,
 } from "../utils/qzone";
 import { useAuthStore } from "../stores/auth";
-import { getArchiveInterval } from "../utils/appSettings";
+import { getArchiveFeedRetryAttempts, getArchiveInterval, getResumeCursorMaxAgeSeconds } from "../utils/appSettings";
 
 const authStore = useAuthStore();
 const { loggedIn } = storeToRefs(authStore);
@@ -21,6 +22,7 @@ const skipFilter = ref<"all" | "pending" | "resolved">("all");
 const clearingResolved = ref(false);
 const batchRetrying = ref(false);
 const batchStopping = ref(false);
+const startMenu = ref();
 const currentTime = ref(Date.now());
 let timer: number | undefined;
 const running = computed(() => progress.value.status === "running");
@@ -58,10 +60,10 @@ async function refresh() {
   try { skips.value = await listArchiveSkips(); } catch { /* 保留当前列表 */ }
 }
 function beginPolling() { window.clearInterval(timer); timer = window.setInterval(() => { currentTime.value = Date.now(); void refresh(); }, 600); }
-async function start() {
+async function start(mode: "auto" | "fresh") {
   if (!loggedIn.value) return;
   beginPolling();
-  try { progress.value = await startFeedArchive(getArchiveInterval()); }
+  try { progress.value = await startFeedArchive(getArchiveInterval(), mode, getResumeCursorMaxAgeSeconds(), getArchiveFeedRetryAttempts()); }
   catch { await refresh(); }
   finally { await refresh(); if (progress.value.status === "limited") beginPolling(); else { window.clearInterval(timer); timer = undefined; } }
 }
@@ -70,7 +72,7 @@ async function retrySkip(item: ArchiveSkipItem) {
   retryingId.value = item.id;
   skipNotice.value = "";
   try {
-    const result = await retryArchiveSkip(item.id);
+    const result = await retryArchiveSkip(item.id, getArchiveFeedRetryAttempts());
     skipNotice.value = result.message;
   } catch (error) {
     skipNotice.value = String(error);
@@ -98,7 +100,7 @@ async function retryAllPending() {
   skipNotice.value = "";
   beginPolling();
   try {
-    const result = await retryAllArchiveSkips(getArchiveInterval());
+    const result = await retryAllArchiveSkips(getArchiveInterval(), getArchiveFeedRetryAttempts());
     skipNotice.value = batchStopping.value
       ? `已停止批量重试：本次恢复 ${result.recovered} 条${result.failed ? `，失败 ${result.failed} 条` : ""}`
       : result.total === 0
@@ -129,6 +131,8 @@ function offsetLabel(item: ArchiveSkipItem) {
   const end = item.cursorOffset + item.offsetAdvance - 1;
   return end > item.cursorOffset ? `${item.cursorOffset}–${end}` : String(item.cursorOffset);
 }
+const startMenuItems = [{ label: "从头开始", icon: "pi pi-history", command: () => { void start("fresh"); } }];
+function toggleStartMenu(event: Event) { startMenu.value?.toggle(event); }
 onMounted(async () => { await refresh(); currentTime.value = Date.now(); if (running.value || rateLimited.value || batchRetrying.value || batchProgress.value) beginPolling(); });
 onBeforeUnmount(() => window.clearInterval(timer));
 </script>
@@ -143,7 +147,9 @@ onBeforeUnmount(() => window.clearInterval(timer));
     <div class="task-stats"><div><span>已读取页数</span><strong>{{ progress.pages }}</strong></div><div><span>接口记录</span><strong>{{ progress.fetched }}</strong></div><div><span>写入记录</span><strong>{{ progress.saved }}</strong></div><div><span>待重试异常</span><strong>{{ progress.skipped }}</strong></div></div>
     <div v-if="!loggedIn" class="task-login-notice"><span><i class="pi pi-lock" /></span><div><strong>请先登录 QQ 空间</strong><p>登录后才能创建或继续归档任务。</p></div><Button label="立即登录" icon="pi pi-sign-in" size="small" @click="authStore.openLogin" /></div>
     <div class="task-actions">
-      <Button :label="running ? '归档中…' : batchRetrying ? '批量重试中…' : rateWaiting ? `请等待 ${remainingText}` : rateLimited ? '继续归档' : '开始归档'" icon="pi pi-download" :disabled="running || batchRetrying || rateWaiting || !loggedIn" @click="start" />
+      <Button :label="running ? '归档中…' : batchRetrying ? '批量重试中…' : rateWaiting ? `请等待 ${remainingText}` : '开始归档'" icon="pi pi-download" :disabled="running || batchRetrying || rateWaiting || !loggedIn" @click="start('auto')" />
+      <Button icon="pi pi-chevron-down" aria-label="选择归档方式" severity="secondary" outlined :disabled="running || batchRetrying || rateWaiting || !loggedIn" @click="toggleStartMenu" />
+      <Menu ref="startMenu" :model="startMenuItems" popup />
       <Button v-if="running" label="取消" icon="pi pi-times" severity="secondary" outlined @click="cancel" />
       <Button v-if="batchRetrying" :label="batchStopping ? '正在停止…' : '停止重试'" icon="pi pi-stop" severity="warn" outlined :loading="batchStopping" :disabled="batchStopping" @click="stopBatchRetry" />
     </div>
@@ -180,8 +186,9 @@ onBeforeUnmount(() => window.clearInterval(timer));
   <section class="surface-card task-tips">
     <div class="task-tips-heading"><span><i class="pi pi-info-circle" /></span><h4>温馨提示</h4></div>
     <ul>
+      <li>点击<strong>开始归档</strong>会在有效断点内自动续传，断点过期后从头扫描；右侧下拉菜单可随时选择<strong>从头开始</strong>。</li>
+      <li>QQ 空间服务器可能不稳定；频繁出现 <strong>500 / 501</strong> 时，可在设置中提高<strong>单页失败重试次数</strong>和<strong>单页获取间隔</strong>。</li>
       <li>空间内容的获取基于 QQ 空间的<strong>互动列表</strong>来获取。没有被点赞或评论过的动态无法被恢复。</li>
-      <li>出现<strong>频繁提示</strong>时建议换个时间再继续。程序支持<strong>断点续传</strong>，可以接着上次的进度继续归档。</li>
       <li>归档过程中<strong>不要切换 QQ 客户端账号</strong>，否则可能有冻结风险。</li>
     </ul>
   </section>

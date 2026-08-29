@@ -943,15 +943,16 @@ pub(crate) async fn fetch_feeds(
     refresh_type: &str,
     attach_info: Option<&str>,
 ) -> Result<FeedPage, String> {
-    fetch_feeds_with_attempts(state, refresh_type, attach_info, FEED_RESPONSE_ATTEMPTS).await
+    fetch_feeds_with_retry_attempts(state, refresh_type, attach_info, FEED_RESPONSE_ATTEMPTS).await
 }
 
-pub(crate) async fn fetch_feeds_once(
+pub(crate) async fn fetch_feeds_with_retry_attempts(
     state: &QLoginState,
     refresh_type: &str,
     attach_info: Option<&str>,
+    attempts: u32,
 ) -> Result<FeedPage, String> {
-    fetch_feeds_with_attempts(state, refresh_type, attach_info, 1).await
+    fetch_feeds_with_attempts(state, refresh_type, attach_info, attempts).await
 }
 
 pub(crate) fn feed_error_can_skip(error: &str) -> bool {
