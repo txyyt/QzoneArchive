@@ -797,7 +797,8 @@ fn retryable_response_reason(status: reqwest::StatusCode, body: &str) -> Option<
 }
 
 fn feed_retry_delay(attempt: u32) -> std::time::Duration {
-    std::time::Duration::from_millis(1_500 * 2_u64.pow(attempt.saturating_sub(1)))
+    // 指数退避最多等待 24 秒，避免高重试次数导致长时间无响应。
+    std::time::Duration::from_millis((1_500 * 2_u64.pow(attempt.saturating_sub(1))).min(24_000))
 }
 
 fn sec_ch_ua(user_agent: &str) -> String {
@@ -1200,7 +1201,10 @@ pub async fn fetch_more_feeds(
 
 #[cfg(test)]
 mod tests {
-    use super::{ensure_qzone_success, feed_error_can_skip, parse_feed_page, parse_qzone_json, retryable_response_reason, FEEDS_URL};
+    use super::{
+        ensure_qzone_success, feed_error_can_skip, feed_retry_delay, parse_feed_page,
+        parse_qzone_json, retryable_response_reason, FEEDS_URL,
+    };
     use reqwest::StatusCode;
     use serde_json::json;
 
@@ -1249,6 +1253,13 @@ mod tests {
             r#"{"code":-1,"message":"系统繁忙，请稍后再试"}"#,
         )
         .is_some());
+    }
+
+    #[test]
+    fn caps_feed_retry_backoff_at_24_seconds() {
+        assert_eq!(feed_retry_delay(1).as_millis(), 1_500);
+        assert_eq!(feed_retry_delay(5).as_millis(), 24_000);
+        assert_eq!(feed_retry_delay(12).as_millis(), 24_000);
     }
 
     #[test]
